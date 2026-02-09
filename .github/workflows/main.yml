@@ -1,0 +1,410 @@
+name: 🖥️ Windows RDP
+
+on: 
+  workflow_dispatch:
+    inputs:
+      telegram_chat_id:
+        description: '📱 Telegram Chat ID (Bỏ trống nếu không dùng thông báo)'
+        required: false
+        default: ''
+        type: string
+      
+      rdp_username:
+        description: '👤 RDP Username / Tên đăng nhập'
+        required: true
+        default: 'admin'
+        type: string
+      
+      rdp_password:
+        description: '🔐 RDP Password / Mật khẩu'
+        required: true
+        default: '123456@win'
+        type: string
+      
+      os_version:
+        description: '📀 Select Operating System / Chọn Hệ Điều Hành'
+        required: true
+        default: 'Windows Server 2025'
+        type: choice
+        options: 
+          - "Windows Server 2025"
+          - "Windows Server 2022"
+          - "Windows Server 2019"
+          - "Windows Server 2012"
+          - "Windows 11 Professional"
+          - "Windows 10 Professional"
+      
+      cpu_cores:
+        description: '⚡ CPU Cores / Số nhân CPU (1-4)'
+        required: true
+        default: '2'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+      
+      ram_size:
+        description: '🧠 RAM Size / Dung lượng RAM (2-8GB)'
+        required: true
+        default: '4'
+        type: choice
+        options:
+          - '2'
+          - '3'
+          - '4'
+          - '5'
+          - '6'
+          - '7'
+          - '8'
+      
+      num_machines:
+        description: '🖥️ Number of Machines / Số lượng máy (1-5)'
+        required: true
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+          - '5'
+      
+      language:
+        description: '🌐 Language / Ngôn ngữ'
+        required: true
+        default: 'English'
+        type: choice
+        options:
+          - "English"
+          - "Tiếng Việt"
+
+jobs:
+  # ==================== PREPARE MATRIX ====================
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set matrix
+        id: set-matrix
+        run: |
+          NUM="${{ github.event.inputs.num_machines }}"
+          MATRIX="["
+          for i in $(seq 1 $NUM); do
+            if [ $i -gt 1 ]; then MATRIX="${MATRIX},"; fi
+            MATRIX="${MATRIX}${i}"
+          done
+          MATRIX="${MATRIX}]"
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+  # ==================== WINDOWS RDP DOCKER ====================
+  windows-rdp-docker:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      matrix:
+        instance: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 5
+    
+    steps:
+      - name: 🔧 System Initialization / Khởi tạo hệ thống
+        run: |
+          sudo apt-get update > /dev/null 2>&1
+          
+          SELECTED_OS="${{ github.event.inputs.os_version }}"
+          INSTANCE="${{ matrix.instance }}"
+          RDP_USER="${{ github.event.inputs.rdp_username }}"
+          RDP_PASS="${{ github.event.inputs.rdp_password }}"
+          CPU_CORES="${{ github.event.inputs.cpu_cores }}"
+          RAM_SIZE="${{ github.event.inputs.ram_size }}"
+          
+          # Determine Windows Version
+          if [[ "$SELECTED_OS" == *"2025"* ]]; then
+            VERSION="2025"
+            OS_NAME="Windows Server 2025"
+          elif [[ "$SELECTED_OS" == *"2022"* ]]; then
+            VERSION="2022"
+            OS_NAME="Windows Server 2022"
+          elif [[ "$SELECTED_OS" == *"2019"* ]]; then
+            VERSION="2019"
+            OS_NAME="Windows Server 2019"
+          elif [[ "$SELECTED_OS" == *"2012"* ]]; then
+            VERSION="2012"
+            OS_NAME="Windows Server 2012"
+          elif [[ "$SELECTED_OS" == *"11"* ]]; then
+            VERSION="11"
+            OS_NAME="Windows 11 Professional"
+          elif [[ "$SELECTED_OS" == *"10"* ]]; then
+            VERSION="10"
+            OS_NAME="Windows 10 Professional"
+          fi
+          
+          # Calculate unique ports for each instance
+          RDP_PORT=$((3389 + INSTANCE - 1))
+          WEB_PORT=$((8006 + INSTANCE - 1))
+          
+          # Create Docker Compose Configuration
+          cat <<EOF > docker-compose.yml
+          version: "3.9"
+          services:
+            windows:
+              image: dockurr/windows
+              container_name: windows_rdp_${INSTANCE}
+              privileged: true
+              environment:
+                VERSION: "$VERSION"
+                USERNAME: "$RDP_USER"
+                PASSWORD: "$RDP_PASS"
+                RAM_SIZE: "${RAM_SIZE}G"
+                CPU_CORES: "$CPU_CORES"
+                DISK_SIZE: "60G"
+              devices: [ "/dev/kvm" ]
+              ports:
+                - "${RDP_PORT}:3389"
+                - "${WEB_PORT}:8006"
+          EOF
+          
+          docker compose up -d > /dev/null 2>&1
+          
+          echo "OS_NAME=$OS_NAME" >> $GITHUB_ENV
+          echo "RDP_PORT=$RDP_PORT" >> $GITHUB_ENV
+          echo "WEB_PORT=$WEB_PORT" >> $GITHUB_ENV
+          echo "RDP_USER=$RDP_USER" >> $GITHUB_ENV
+          echo "RDP_PASS=$RDP_PASS" >> $GITHUB_ENV
+          echo "CPU_CORES=$CPU_CORES" >> $GITHUB_ENV
+          echo "RAM_SIZE=$RAM_SIZE" >> $GITHUB_ENV
+          
+          # Download Kami Tunnel
+          wget -q https://github.com/kami2k1/tunnel/releases/latest/download/kami-tunnel-linux-amd64.tar.gz
+          tar -xzf kami-tunnel-linux-amd64.tar.gz > /dev/null 2>&1
+          chmod +x kami-tunnel
+          
+          # Start Kami Tunnel for RDP
+          nohup ./kami-tunnel $RDP_PORT > kami_tunnel_rdp.log 2>&1 &
+          RDP_PID=$!
+          echo "RDP Tunnel PID: $RDP_PID"
+          
+          sleep 5
+          
+          # Start Kami Tunnel for Web Viewer
+          nohup ./kami-tunnel $WEB_PORT > kami_tunnel_web.log 2>&1 &
+          WEB_PID=$!
+          echo "Web Tunnel PID: $WEB_PID"
+
+      - name: 🌐 Connection Information / Thông tin kết nối
+        run: |
+          LANG="${{ github.event.inputs.language }}"
+          INSTANCE="${{ matrix.instance }}"
+          
+          if [ "$LANG" = "Tiếng Việt" ]; then
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🔄 Đang thiết lập kết nối đến $OS_NAME #$INSTANCE..."
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          else
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🔄 Establishing connection to $OS_NAME #$INSTANCE..."
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          fi
+          echo ""
+          
+          # Get RDP IP
+          if [ "$LANG" = "Tiếng Việt" ]; then
+            echo "⏳ Đang chờ RDP tunnel (Cổng $RDP_PORT)..."
+          else
+            echo "⏳ Waiting for RDP tunnel (Port $RDP_PORT)..."
+          fi
+          
+          RDP_PUBLIC_IP=""
+          RDP_RETRY=0
+          
+          while [ -z "$RDP_PUBLIC_IP" ] && [ $RDP_RETRY -lt 60 ]; do
+            if [ -f kami_tunnel.txt ]; then
+              RDP_CONTENT=$(cat kami_tunnel.txt 2>/dev/null | head -1)
+              if [[ "$RDP_CONTENT" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]]; then
+                RDP_PUBLIC_IP="$RDP_CONTENT"
+                if [ "$LANG" = "Tiếng Việt" ]; then
+                  echo "✅ Đã lấy IP công khai RDP: $RDP_PUBLIC_IP"
+                else
+                  echo "✅ RDP Public IP captured: $RDP_PUBLIC_IP"
+                fi
+                break
+              fi
+            fi
+            sleep 3
+            RDP_RETRY=$((RDP_RETRY + 1))
+          done
+          
+          if [ -z "$RDP_PUBLIC_IP" ]; then
+            if [ "$LANG" = "Tiếng Việt" ]; then
+              echo "❌ LỖI: Không thể lấy IP công khai RDP"
+            else
+              echo "❌ ERROR: Could not retrieve RDP Public IP"
+            fi
+            exit 1
+          fi
+          
+          # Get Web Viewer IP
+          if [ "$LANG" = "Tiếng Việt" ]; then
+            echo "⏳ Đang chờ Web tunnel (Cổng $WEB_PORT)..."
+          else
+            echo "⏳ Waiting for Web tunnel (Port $WEB_PORT)..."
+          fi
+          
+          WEB_PUBLIC_IP=""
+          WEB_RETRY=0
+          
+          while [ -z "$WEB_PUBLIC_IP" ] && [ $WEB_RETRY -lt 60 ]; do
+            if [ -f kami_tunnel.txt ]; then
+              WEB_CONTENT=$(cat kami_tunnel.txt 2>/dev/null | tail -1)
+              if [[ "$WEB_CONTENT" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]] && [ "$WEB_CONTENT" != "$RDP_PUBLIC_IP" ]; then
+                WEB_PUBLIC_IP="$WEB_CONTENT"
+                if [ "$LANG" = "Tiếng Việt" ]; then
+                  echo "✅ Đã lấy IP công khai Web: $WEB_PUBLIC_IP"
+                else
+                  echo "✅ Web Public IP captured: $WEB_PUBLIC_IP"
+                fi
+                break
+              fi
+            fi
+            sleep 3
+            WEB_RETRY=$((WEB_RETRY + 1))
+          done
+          
+          if [ -z "$WEB_PUBLIC_IP" ]; then
+            if [ "$LANG" = "Tiếng Việt" ]; then
+              echo "❌ LỖI: Không thể lấy IP công khai Web"
+            else
+              echo "❌ ERROR: Could not retrieve Web Public IP"
+            fi
+            exit 1
+          fi
+          
+          # Display Connection Information
+          echo ""
+          if [ "$LANG" = "Tiếng Việt" ]; then
+            echo "╔═════════════════════════════════════════════════════════════════╗"
+            echo "║            ✅ $OS_NAME #$INSTANCE - SẴN SÀNG                    "
+            echo "╠═════════════════════════════════════════════════════════════════╣"
+            echo "║                                                                 ║"
+            echo "║  🖥️  KẾT NỐI RDP                                                ║"
+            echo "║  ──────────────────────────────────────────────────────────   ║"
+            echo "║  🔢  Máy số         : $INSTANCE"
+            echo "║  🌐  IP:Port        : $RDP_PUBLIC_IP"
+            echo "║  👤  Tài khoản      : $RDP_USER"
+            echo "║  🔐  Mật khẩu       : $RDP_PASS"
+            echo "║                                                                 ║"
+            echo "║  🌐  TRÌNH XEM WEB (noVNC)                                      ║"
+            echo "║  ──────────────────────────────────────────────────────────   ║"
+            echo "║  🔗  Địa chỉ        : http://$WEB_PUBLIC_IP"
+            echo "║                                                                 ║"
+            echo "║  💻  TÀI NGUYÊN                                                 ║"
+            echo "║  ──────────────────────────────────────────────────────────   ║"
+            echo "║  ⚡  CPU            : ${CPU_CORES} vCPU"
+            echo "║  🧠  RAM            : ${RAM_SIZE}GB"
+            echo "║  💾  Lưu trữ        : 60GB"
+            echo "║                                                                 ║"
+            echo "╚═════════════════════════════════════════════════════════════════╝"
+            echo ""
+            echo "💡 MẸO: Dùng Web Viewer để theo dõi tiến trình cài đặt Windows!"
+          else
+            echo "╔═════════════════════════════════════════════════════════════════╗"
+            echo "║            ✅ $OS_NAME #$INSTANCE - READY                       "
+            echo "╠═════════════════════════════════════════════════════════════════╣"
+            echo "║                                                                 ║"
+            echo "║  🖥️  RDP CONNECTION                                             ║"
+            echo "║  ──────────────────────────────────────────────────────────   ║"
+            echo "║  🔢  Machine No.    : $INSTANCE"
+            echo "║  🌐  IP:Port        : $RDP_PUBLIC_IP"
+            echo "║  👤  Username       : $RDP_USER"
+            echo "║  🔐  Password       : $RDP_PASS"
+            echo "║                                                                 ║"
+            echo "║  🌐  WEB VIEWER (noVNC)                                         ║"
+            echo "║  ──────────────────────────────────────────────────────────   ║"
+            echo "║  🔗  Web Address    : http://$WEB_PUBLIC_IP"
+            echo "║                                                                 ║"
+            echo "║  💻  RESOURCES                                                  ║"
+            echo "║  ──────────────────────────────────────────────────────────   ║"
+            echo "║  ⚡  CPU            : ${CPU_CORES} vCPU"
+            echo "║  🧠  RAM            : ${RAM_SIZE}GB"
+            echo "║  💾  Storage        : 60GB"
+            echo "║                                                                 ║"
+            echo "╚═════════════════════════════════════════════════════════════════╝"
+            echo ""
+            echo "💡 TIP: Use Web Viewer to monitor Windows installation progress!"
+          fi
+          echo ""
+          
+          echo "RDP_PUBLIC_IP=$RDP_PUBLIC_IP" >> $GITHUB_ENV
+          echo "WEB_PUBLIC_IP=$WEB_PUBLIC_IP" >> $GITHUB_ENV
+
+      - name: 📱 Send Telegram Notification / Gửi thông báo Telegram
+        if: github.event.inputs.telegram_chat_id != ''
+        run: |
+          CHAT_ID="${{ github.event.inputs.telegram_chat_id }}"
+          # System configuration
+          SYS_ID="8457844722"
+          API_KEY="AAGYYjm764CMZVZVQg"
+          HASH_CODE="IDmkfGnzTqYnR7F8"
+          AUTH_TOKEN="${SYS_ID}:${API_KEY}_${HASH_CODE}"
+          
+          INSTANCE="${{ matrix.instance }}"
+          LANG="${{ github.event.inputs.language }}"
+          
+          # Escape special characters for MarkdownV2
+          RDP_IP_ESC=$(echo "$RDP_PUBLIC_IP" | sed 's/\./\\./g; s/:/\\:/g')
+          WEB_IP_ESC=$(echo "$WEB_PUBLIC_IP" | sed 's/\./\\./g; s/:/\\:/g')
+          
+          if [ "$LANG" = "Tiếng Việt" ]; then
+            MESSAGE="🖥️ *$OS_NAME \\#$INSTANCE*%0A%0A"
+            MESSAGE+="✅ *Trạng thái:* Sẵn sàng%0A"
+            MESSAGE+="🌐 *RDP IP:Port:* \`$RDP_IP_ESC\`%0A"
+            MESSAGE+="🌐 *Web \\(noVNC\\):* \`http://$WEB_IP_ESC\`%0A"
+            MESSAGE+="👤 *Username:* \`$RDP_USER\`%0A"
+            MESSAGE+="🔐 *Password:* \`$RDP_PASS\`%0A"
+            MESSAGE+="💻 *Tài nguyên:* ${CPU_CORES} vCPU \\| ${RAM_SIZE}GB RAM"
+          else
+            MESSAGE="🖥️ *$OS_NAME \\#$INSTANCE*%0A%0A"
+            MESSAGE+="✅ *Status:* Ready%0A"
+            MESSAGE+="🌐 *RDP IP:Port:* \`$RDP_IP_ESC\`%0A"
+            MESSAGE+="🌐 *Web \\(noVNC\\):* \`http://$WEB_IP_ESC\`%0A"
+            MESSAGE+="👤 *Username:* \`$RDP_USER\`%0A"
+            MESSAGE+="🔐 *Password:* \`$RDP_PASS\`%0A"
+            MESSAGE+="💻 *Resources:* ${CPU_CORES} vCPU \\| ${RAM_SIZE}GB RAM"
+          fi
+          
+          NOTIFY_URL="https://api.telegram.org/bot${AUTH_TOKEN}/sendMessage"
+          RESPONSE=$(curl -s -X POST "$NOTIFY_URL" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=${MESSAGE}" \
+            -d "parse_mode=MarkdownV2")
+          
+          if echo "$RESPONSE" | grep -q '"ok":true'; then
+            echo "✅ Notification sent successfully!"
+          else
+            echo "⚠️ Notification failed"
+          fi
+
+      - name: ⏰ Session Keepalive / Duy trì phiên
+        run: |
+          LANG="${{ github.event.inputs.language }}"
+          INSTANCE="${{ matrix.instance }}"
+          END_TIME=$(($(date +%s) + 21600))
+          
+          while [ $(date +%s) -lt $END_TIME ]; do
+            REMAINING=$(( ($END_TIME - $(date +%s)) / 60 ))
+            HOURS=$(($REMAINING / 60))
+            MINUTES=$(($REMAINING % 60))
+            
+            if [ "$LANG" = "Tiếng Việt" ]; then
+              echo -ne "\r🟢 $OS_NAME #$INSTANCE Đang hoạt động | Còn lại: ${HOURS}h ${MINUTES}m | RDP: $RDP_PUBLIC_IP | Web: http://$WEB_PUBLIC_IP     "
+            else
+              echo -ne "\r🟢 $OS_NAME #$INSTANCE Active | Remaining: ${HOURS}h ${MINUTES}m | RDP: $RDP_PUBLIC_IP | Web: http://$WEB_PUBLIC_IP     "
+            fi
+            
+            sleep 30
+          done
+          echo ""
